@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="ESP32-CAM dashboard">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f0f10"/>
+      <stop offset="100%" stop-color="#1a1b1d"/>
+    </linearGradient>
+    <linearGradient id="cam" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#222"/>
+      <stop offset="100%" stop-color="#2e2f33"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="90" y="95" fill="#f0f0f0" font-size="44" font-family="Segoe UI, Arial, sans-serif" font-weight="700">ESP32-CAM Live View</text>
+  <text x="90" y="135" fill="#a9adb4" font-size="22" font-family="Segoe UI, Arial, sans-serif">Podglad MJPEG + kontrola LED + zmiana rozdzielczosci</text>
+
+  <rect x="90" y="170" width="1420" height="600" rx="22" fill="#0a0a0b" stroke="#303238"/>
+  <rect x="120" y="205" width="980" height="530" rx="16" fill="url(#cam)"/>
+
+  <rect x="1140" y="205" width="340" height="530" rx="16" fill="#151619" stroke="#2f3137"/>
+  <text x="1170" y="250" fill="#f6f6f6" font-size="24" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Status</text>
+  <text x="1170" y="290" fill="#bdc2c9" font-size="18" font-family="Segoe UI, Arial, sans-serif">Transmisja aktywna</text>
+  <text x="1170" y="324" fill="#bdc2c9" font-size="18" font-family="Segoe UI, Arial, sans-serif">Aktywnosc: 42 ms</text>
+  <text x="1170" y="358" fill="#bdc2c9" font-size="18" font-family="Segoe UI, Arial, sans-serif">LED: OFF</text>
+
+  <rect x="1170" y="410" width="280" height="50" rx="12" fill="#ffd24a"/>
+  <text x="1310" y="442" fill="#121212" text-anchor="middle" font-size="18" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Wlacz/wylacz LED</text>
+
+  <rect x="1170" y="480" width="280" height="50" rx="12" fill="#ffd24a"/>
+  <text x="1310" y="512" fill="#121212" text-anchor="middle" font-size="18" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Pelny ekran</text>
+
+  <rect x="1170" y="550" width="280" height="50" rx="12" fill="#2a2b30" stroke="#454853"/>
+  <text x="1310" y="581" fill="#eceff4" text-anchor="middle" font-size="18" font-family="Segoe UI, Arial, sans-serif">vga</text>
+
+  <rect x="1170" y="620" width="280" height="50" rx="12" fill="#ffd24a"/>
+  <text x="1310" y="652" fill="#121212" text-anchor="middle" font-size="18" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Zastosuj obraz</text>
+
+  <text x="130" y="715" fill="#a7acb3" font-size="17" font-family="Segoe UI, Arial, sans-serif">Podglad przykladowy: panel glownego widoku aplikacji webowej.</text>
+</svg>

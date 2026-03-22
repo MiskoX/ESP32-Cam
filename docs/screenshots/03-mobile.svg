@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1400" viewBox="0 0 900 1400" role="img" aria-label="ESP32-CAM mobile full screen">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1012"/>
+      <stop offset="100%" stop-color="#181b20"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="900" height="1400" fill="url(#bg3)"/>
+  <rect x="180" y="70" width="540" height="1260" rx="56" fill="#070708" stroke="#32353d" stroke-width="4"/>
+  <rect x="205" y="140" width="490" height="1120" rx="24" fill="#000"/>
+
+  <text x="450" y="210" text-anchor="middle" fill="#f3f3f3" font-size="32" font-family="Segoe UI, Arial, sans-serif" font-weight="700">ESP32-CAM</text>
+  <rect x="245" y="265" width="410" height="740" rx="16" fill="#1b1d22"/>
+  <text x="450" y="1035" text-anchor="middle" fill="#b5bbc5" font-size="20" font-family="Segoe UI, Arial, sans-serif">Tryb pelnoekranowy</text>
+
+  <rect x="285" y="1090" width="330" height="62" rx="31" fill="rgba(0,0,0,0.72)" stroke="rgba(255,255,255,0.35)"/>
+  <text x="450" y="1130" text-anchor="middle" fill="#fff" font-size="22" font-family="Segoe UI, Arial, sans-serif" font-weight="700">Wyjdz z pelnego ekranu</text>
+
+  <text x="450" y="1325" text-anchor="middle" fill="#9ba2ad" font-size="20" font-family="Segoe UI, Arial, sans-serif">Widok mobilny aplikacji</text>
+</svg>
