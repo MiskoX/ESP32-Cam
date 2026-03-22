@@ -32,6 +32,9 @@ This keeps the web interface responsive while the video stream stays independent
 - Fullscreen (desktop and mobile)
 - LED toggle with debounce and auto-off
 - Image profile switching: qvga / vga / svga
+- WiFi onboarding based on WiFiManager captive portal
+- FreeRTOS task split for UI, LED API, and streaming server
+- Atomic state coordination for stream ownership and runtime flags
 
 ## Gallery
 
@@ -45,7 +48,9 @@ This keeps the web interface responsive while the video stream stays independent
 
 ### Mobile view
 
-![Mobile view](docs/screenshots/03-mobile.png)
+<p align="center">
+	<img src="docs/screenshots/03-mobile.png" alt="Mobile view" width="360" />
+</p>
 
 ## Quick start
 
@@ -82,6 +87,8 @@ On first boot, the device starts a WiFiManager configuration portal:
 | 82   | /?stream=1&viewer=<id>                 | MJPEG stream              |
 
 ## Architecture
+
+The runtime uses WiFiManager for first-time network onboarding, FreeRTOS tasks for parallel HTTP handling, and atomic variables for low-latency shared state updates between server loops.
 
 ```mermaid
 flowchart LR
