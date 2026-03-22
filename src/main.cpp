@@ -992,6 +992,21 @@ void failSetupAndRestart() {
   ESP.restart();
 }
 
+void runHousekeepingTick() {
+  if (!lockState(pdMS_TO_TICKS(20))) {
+    return;
+  }
+
+  if (ledEnabled.load(std::memory_order_relaxed) && ledAutoOffAtMs != 0) {
+    if ((long)(millis() - ledAutoOffAtMs) >= 0) {
+      setFlashLed(false);
+      ledAutoOffAtMs = 0;
+    }
+  }
+
+  unlockState();
+}
+
 void setup() {
   delay(1000);
 
@@ -1044,5 +1059,6 @@ void setup() {
 }
 
 void loop() {
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  runHousekeepingTick();
+  vTaskDelay(pdMS_TO_TICKS(250));
 }
