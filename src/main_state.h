@@ -29,7 +29,7 @@ extern std::atomic<unsigned long> streamActivityHeartbeatMs;
 extern std::atomic<int> consecutiveNoFrameFailures;
 
 constexpr unsigned long kCameraIdleShutdownMs = 10000;
-constexpr bool kEnableCameraIdlePowerDown = false;
+constexpr bool kEnableCameraIdlePowerDown = true;
 constexpr unsigned long kLedAutoOffTimeoutMs = 15000;
 constexpr uint32_t kCpuFreqActiveMHz = 240;
 constexpr uint32_t kCpuFreqIdleMHz = 160;

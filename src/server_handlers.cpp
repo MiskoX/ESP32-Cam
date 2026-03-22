@@ -11,6 +11,22 @@
 
 void serverHandleRoot() {
   if (server.hasArg("claim") || server.hasArg("takeover")) {
+    auto wakeCameraAfterClaimIfNeeded = [&]() {
+      if (cameraActive.load(std::memory_order_relaxed)) {
+        return;
+      }
+
+      if (!streamLockCameraOp(pdMS_TO_TICKS(120))) {
+        return;
+      }
+
+      if (!cameraActive.load(std::memory_order_relaxed)) {
+        initCamera();
+      }
+
+      streamUnlockCameraOp();
+    };
+
     String viewerToken = server.arg("viewer");
     if (viewerToken.length() == 0) {
       server.send(400, "text/plain", "Missing viewer token");
@@ -45,6 +61,7 @@ void serverHandleRoot() {
         streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed);
       }
       sessionUnlockState();
+      wakeCameraAfterClaimIfNeeded();
       server.sendHeader("Cache-Control", "no-store");
       server.send(200, "application/json", "{\"ok\":true,\"decision\":\"join\"}");
       return;
@@ -54,8 +71,7 @@ void serverHandleRoot() {
     unsigned long latestSeenMs = (streamBeatMs > activeViewerLastSeenMs) ? streamBeatMs : activeViewerLastSeenMs;
     unsigned long inactivityMs = (latestSeenMs == 0) ? 0 : (unsigned long)(nowMs - latestSeenMs);
     bool staleSession = (inactivityMs > 2500);
-    bool hasRunningStream = (streamLoopCount.load(std::memory_order_relaxed) > 0);
-    bool allowTakeover = forceTakeover || staleSession || !hasRunningStream;
+    bool allowTakeover = forceTakeover || staleSession;
     if (!allowTakeover) {
       sessionUnlockState();
       server.sendHeader("Cache-Control", "no-store");
@@ -87,6 +103,7 @@ void serverHandleRoot() {
     lastOwnerSwitchCooldownMs = sessionNextOwnerSwitchCooldownMs();
     streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed);
     sessionUnlockState();
+    wakeCameraAfterClaimIfNeeded();
 
     unsigned long handoffStartMs = millis();
     while (streamLoopCount.load(std::memory_order_relaxed) > 0 && (unsigned long)(millis() - handoffStartMs) < kOwnerHandoffWaitMs) {
@@ -295,11 +312,24 @@ void streamHandleRoot() {
     return;
   }
 
-  if (!streamWarmupFirstFrameWithRecovery()) {
-    // Non-fatal: continue and let stream loop try to recover frames.
-    if (sessionLockState(pdMS_TO_TICKS(50))) {
-      sessionClearStreamReservationLocked();
-      sessionUnlockState();
+  if (needInit) {
+    // Fast wake path: keep startup responsive after idle power-down.
+    unsigned long warmupStartMs = millis();
+    while ((unsigned long)(millis() - warmupStartMs) < 900) {
+      camera_fb_t *warmupFrame = esp_camera_fb_get();
+      if (warmupFrame != nullptr) {
+        esp_camera_fb_return(warmupFrame);
+        break;
+      }
+      delay(20);
+    }
+  } else {
+    if (!streamWarmupFirstFrameWithRecovery()) {
+      // Non-fatal: continue and let stream loop try to recover frames.
+      if (sessionLockState(pdMS_TO_TICKS(50))) {
+        sessionClearStreamReservationLocked();
+        sessionUnlockState();
+      }
     }
   }
 
@@ -386,23 +416,26 @@ void streamHandleRoot() {
     return fb;
   };
 
-  firstFrame = tryGetFirstFrame(6000);
+  const unsigned long firstFrameBudgetMs = needInit ? 2200 : 6000;
+  const unsigned long recoveryFrameBudgetMs = needInit ? 1200 : 4000;
+
+  firstFrame = tryGetFirstFrame(firstFrameBudgetMs);
 
   if (firstFrame == nullptr) {
     shutdownCamera();
     if (initCamera()) {
-      firstFrame = tryGetFirstFrame(4000);
+      firstFrame = tryGetFirstFrame(recoveryFrameBudgetMs);
     }
   }
 
-  if (firstFrame == nullptr) {
+  if (firstFrame == nullptr && !needInit) {
     framesize_t currentFrameSize = FRAMESIZE_VGA;
     getCameraStreamConfig(currentFrameSize);
     if (currentFrameSize != FRAMESIZE_QVGA) {
       shutdownCamera();
       setCameraStreamConfig(FRAMESIZE_QVGA);
       if (initCamera()) {
-        firstFrame = tryGetFirstFrame(4000);
+        firstFrame = tryGetFirstFrame(recoveryFrameBudgetMs);
       }
     }
   }

@@ -42,7 +42,7 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
   const statusPollMs = 1200;
   const maxStatusPollFailuresForOffline = 4;
   const retryJitterMaxMs = 900;
-  const firstFrameWaitMs = 12000;
+  const firstFrameWaitMs = 7000;
 
   if (takeoverBtn) {
     takeoverBtn.style.display = 'none';
@@ -288,7 +288,7 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
     streamConnectAttempts += 1;
     setOverlay('Łączenie z kamerą...', true);
     status.textContent = 'Łączenie z kamerą...';
-    img.style.display = 'block';
+    img.style.display = 'none';
     img.src = streamBaseUrl + '?stream=1&viewer=' + encodeURIComponent(viewerId) + '&t=' + Date.now();
     streamRunning = true;
 
@@ -487,6 +487,7 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
     awaitingManualTakeover = false;
     manualTakeoverInFlight = false;
     setOverlay('', false);
+    img.style.display = 'block';
     if (unlockApplyOnNextFrame) {
       unlockApplyOnNextFrame = false;
       applyCamBtn.disabled = false;

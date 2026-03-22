@@ -31,6 +31,28 @@ std::atomic<uint32_t> streamOwnerEpoch{0};
 std::atomic<unsigned long> streamActivityHeartbeatMs{0};
 std::atomic<int> consecutiveNoFrameFailures{0};
 
+constexpr unsigned long kWifiHealthCheckPeriodMs = 1000;
+constexpr unsigned long kWifiReconnectIntervalMs = 5000;
+unsigned long wifiLastHealthCheckMs = 0;
+unsigned long wifiLastReconnectAttemptMs = 0;
+
+void runWifiWatchdogTick() {
+  unsigned long nowMs = millis();
+  if ((unsigned long)(nowMs - wifiLastHealthCheckMs) < kWifiHealthCheckPeriodMs) {
+    return;
+  }
+  wifiLastHealthCheckMs = nowMs;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  if (wifiLastReconnectAttemptMs == 0 || (unsigned long)(nowMs - wifiLastReconnectAttemptMs) >= kWifiReconnectIntervalMs) {
+    WiFi.reconnect();
+    wifiLastReconnectAttemptMs = nowMs;
+  }
+}
+
 void uiServerTask(void *pvParameters) {
   (void)pvParameters;
   while (true) {
@@ -64,6 +86,10 @@ void failSetupAndRestart() {
 }
 
 void runHousekeepingTick() {
+  runWifiWatchdogTick();
+
+  bool shouldAttemptCameraShutdown = false;
+
   if (!sessionLockState(pdMS_TO_TICKS(20))) {
     return;
   }
@@ -75,7 +101,45 @@ void runHousekeepingTick() {
     }
   }
 
+  if (kEnableCameraIdlePowerDown && cameraShutdownAtMs != 0) {
+    if ((long)(millis() - cameraShutdownAtMs) >= 0) {
+      shouldAttemptCameraShutdown = true;
+    }
+  }
+
   sessionUnlockState();
+
+  if (!shouldAttemptCameraShutdown) {
+    return;
+  }
+
+  if (!streamLockCameraOp(pdMS_TO_TICKS(20))) {
+    return;
+  }
+
+  bool shouldShutdownNow = false;
+  if (sessionLockState(pdMS_TO_TICKS(20))) {
+    // Keep lock order cameraOp -> state to avoid deadlocks with stream startup path.
+    bool hasViewer = sessionValidateViewerLocked();
+    bool hasRunningStream = (streamLoopCount.load(std::memory_order_relaxed) > 0);
+    if (!hasViewer && !hasRunningStream && cameraShutdownAtMs != 0 && (long)(millis() - cameraShutdownAtMs) >= 0) {
+      cameraShutdownAtMs = 0;
+      ledAutoOffAtMs = 0;
+      shouldShutdownNow = true;
+    }
+    sessionUnlockState();
+  }
+
+  if (shouldShutdownNow) {
+    if (ledEnabled.load(std::memory_order_relaxed)) {
+      setFlashLed(false);
+    }
+    if (cameraActive.load(std::memory_order_relaxed)) {
+      shutdownCamera();
+    }
+  }
+
+  streamUnlockCameraOp();
 }
 
 void setup() {
@@ -99,6 +163,8 @@ void setup() {
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
+  wifiLastHealthCheckMs = millis();
+  wifiLastReconnectAttemptMs = 0;
 
   stateMutex = xSemaphoreCreateMutex();
   cameraOpMutex = xSemaphoreCreateMutex();
@@ -109,7 +175,11 @@ void setup() {
   if (!initCamera()) {
     blinkCameraInitErrorPattern();
   } else if (kEnableCameraIdlePowerDown) {
-    shutdownCamera();
+    if (sessionLockState(pdMS_TO_TICKS(200))) {
+      // Start with camera active, then power it down after idle timeout if nobody watches.
+      sessionScheduleNoViewerPowerDownLocked();
+      sessionUnlockState();
+    }
   }
 
   if (sessionLockState(pdMS_TO_TICKS(200))) {

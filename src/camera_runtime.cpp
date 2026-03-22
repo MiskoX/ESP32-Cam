@@ -29,6 +29,11 @@ constexpr uint8_t kFlashLedPwmChannel = 15;
 constexpr uint32_t kFlashLedPwmFreqHz = 5000;
 constexpr uint8_t kFlashLedPwmResolutionBits = 8;
 constexpr uint32_t kFlashLedDutyOn = 128;
+constexpr uint32_t kFlashLedDutyShutdownBlink = (255 * 15) / 100;
+constexpr int kCameraStartBlinkCount = 3;
+constexpr int kCameraStopBlinkCount = 2;
+constexpr unsigned long kCameraBlinkOnMs = 90;
+constexpr unsigned long kCameraBlinkOffMs = 90;
 
 bool flashPwmInitialized = false;
 framesize_t configuredFrameSize = FRAMESIZE_VGA;
@@ -44,6 +49,19 @@ void ensureFlashPwmInit() {
   ledcAttachPin(FLASH_LED_GPIO_NUM, kFlashLedPwmChannel);
   ledcWrite(kFlashLedPwmChannel, 0);
   flashPwmInitialized = true;
+}
+
+void blinkFlashPattern(int count, uint32_t onDuty) {
+  const bool previousLedState = ledEnabled.load(std::memory_order_relaxed);
+  for (int i = 0; i < count; ++i) {
+    ledEnabled.store(true, std::memory_order_relaxed);
+    ledcWrite(kFlashLedPwmChannel, onDuty);
+    delay(kCameraBlinkOnMs);
+    ledEnabled.store(false, std::memory_order_relaxed);
+    ledcWrite(kFlashLedPwmChannel, 0);
+    delay(kCameraBlinkOffMs);
+  }
+  setFlashLed(previousLedState);
 }
 }
 
@@ -117,6 +135,8 @@ bool initCamera() {
     s->set_saturation(s, -1);
   }
 
+  blinkFlashPattern(kCameraStartBlinkCount, kFlashLedDutyOn);
+
   return true;
 }
 
@@ -124,6 +144,8 @@ void shutdownCamera() {
   if (!cameraActive) {
     return;
   }
+
+  blinkFlashPattern(kCameraStopBlinkCount, kFlashLedDutyShutdownBlink);
 
   esp_camera_deinit();
   cameraActive.store(false, std::memory_order_relaxed);
