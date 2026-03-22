@@ -35,28 +35,24 @@ This keeps the web interface responsive while the video stream stays independent
 
 ## Gallery
 
-The UI screenshots are stored in the repo and rendered directly on GitHub:
-
 ### Dashboard
 
-![Dashboard](docs/screenshots/01-dashboard.svg)
+![Dashboard](docs/screenshots/01-dashboard.png)
 
 ### Session takeover screen
 
-![Takeover prompt](docs/screenshots/02-takeover.svg)
+![Takeover prompt](docs/screenshots/02-takeover.png)
 
 ### Mobile view
 
-![Mobile view](docs/screenshots/03-mobile.svg)
+![Mobile view](docs/screenshots/03-mobile.png)
 
 ## Quick start
 
 ### 1. Requirements
 
 - ESP32-CAM (AI Thinker)
-- USB-UART adapter for flashing
 - PlatformIO (VS Code)
-- Python (depending on your PlatformIO setup)
 
 ### 2. Clone and build
 
@@ -64,20 +60,6 @@ The UI screenshots are stored in the repo and rendered directly on GitHub:
 git clone https://github.com/<your-user>/ESP32-Cam.git
 cd ESP32-Cam
 pio run
-```
-
-### 3. Upload firmware
-
-Update the port in platformio.ini (default is COM13), then run:
-
-```bash
-pio run -t upload
-```
-
-### 4. Serial monitor
-
-```bash
-pio device monitor
 ```
 
 ## Wi-Fi setup
@@ -127,19 +109,3 @@ src/
 		app_js.h              # Client logic (takeover, reconnect, status)
 platformio.ini
 ```
-
-## Debug tips
-
-- If stream does not start: check 5V power quality and current capacity
-- If takeovers happen too often: inspect Wi-Fi latency and stability
-- If stream stutters: test with qvga frame size
-
-## Roadmap
-
-- JPG snapshots directly from UI
-- Additional metrics (fps, drop rate)
-- Simple PIN auth before preview
-
----
-
-If you want to replace placeholders with real device captures, add PNG/JPG files to docs/screenshots and update links in the Gallery section.
