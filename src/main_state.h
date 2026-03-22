@@ -28,26 +28,26 @@ extern std::atomic<uint32_t> streamOwnerEpoch;
 extern std::atomic<unsigned long> streamActivityHeartbeatMs;
 extern std::atomic<int> consecutiveNoFrameFailures;
 
-inline constexpr unsigned long kCameraIdleShutdownMs = 10000;
-inline constexpr bool kEnableCameraIdlePowerDown = false;
-inline constexpr unsigned long kLedAutoOffTimeoutMs = 15000;
-inline constexpr uint32_t kCpuFreqActiveMHz = 240;
-inline constexpr uint32_t kCpuFreqIdleMHz = 160;
-inline const TickType_t kServerTaskDelayActiveTicks = pdMS_TO_TICKS(4);
-inline const TickType_t kServerTaskDelayIdleTicks = pdMS_TO_TICKS(14);
+constexpr unsigned long kCameraIdleShutdownMs = 10000;
+constexpr bool kEnableCameraIdlePowerDown = false;
+constexpr unsigned long kLedAutoOffTimeoutMs = 15000;
+constexpr uint32_t kCpuFreqActiveMHz = 240;
+constexpr uint32_t kCpuFreqIdleMHz = 160;
+const TickType_t kServerTaskDelayActiveTicks = pdMS_TO_TICKS(4);
+const TickType_t kServerTaskDelayIdleTicks = pdMS_TO_TICKS(14);
 
-inline constexpr unsigned long kOwnerSwitchBaseCooldownMs = 700;
-inline constexpr unsigned long kOwnerSwitchJitterMaxMs = 900;
-inline constexpr unsigned long kOwnerHandoffWaitMs = 1400;
-inline constexpr unsigned long kStreamStartReservationMs = 9000;
-inline constexpr unsigned long kFirstFrameWarmupBudgetMs = 1800;
-inline constexpr int kFirstFrameWarmupAttempts = 4;
-inline constexpr int kQualityDropNoFrameThreshold = 2;
+constexpr unsigned long kOwnerSwitchBaseCooldownMs = 700;
+constexpr unsigned long kOwnerSwitchJitterMaxMs = 900;
+constexpr unsigned long kOwnerHandoffWaitMs = 1400;
+constexpr unsigned long kStreamStartReservationMs = 9000;
+constexpr unsigned long kFirstFrameWarmupBudgetMs = 1800;
+constexpr int kFirstFrameWarmupAttempts = 4;
+constexpr int kQualityDropNoFrameThreshold = 2;
 
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
-inline constexpr BaseType_t kControlCore = ARDUINO_RUNNING_CORE;
-inline constexpr BaseType_t kStreamCore = ARDUINO_RUNNING_CORE;
+constexpr BaseType_t kControlCore = ARDUINO_RUNNING_CORE;
+constexpr BaseType_t kStreamCore = ARDUINO_RUNNING_CORE;
 #else
-inline constexpr BaseType_t kControlCore = 0;
-inline constexpr BaseType_t kStreamCore = 1;
+constexpr BaseType_t kControlCore = 0;
+constexpr BaseType_t kStreamCore = 1;
 #endif
