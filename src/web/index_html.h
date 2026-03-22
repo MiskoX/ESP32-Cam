@@ -17,6 +17,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(<!doctype html>
       <div id="overlay" class="overlay" aria-live="polite">
         <div id="loader" class="loader" aria-hidden="true"></div>
         <p id="overlayMessage" class="overlayMessage"></p>
+        <button id="takeoverBtn" class="takeoverBtn" type="button">Przejmij kamerę</button>
       </div>
       <button id="exitFullscreenBtn" class="exitFullscreenBtn" type="button" aria-label="Wyjdź z pełnego ekranu">Wyjdź z pełnego ekranu</button>
     </div>
@@ -33,7 +34,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(<!doctype html>
       <button id="applyCamBtn" type="button">Zastosuj obraz</button>
     </div>
   </div>
-  <script src="/assets/app.js?v=17"></script>
+  <script src="/assets/app.js?v=34"></script>
 </body>
 </html>
 )HTML";

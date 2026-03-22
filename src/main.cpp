@@ -3,6 +3,7 @@
 #include <WebServer.h>
 #include <WiFiManager.h>
 #include <esp32-hal-cpu.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -21,28 +22,128 @@ SemaphoreHandle_t stateMutex = nullptr;
 SemaphoreHandle_t cameraOpMutex = nullptr;
 unsigned long cameraShutdownAtMs = 0;
 const unsigned long cameraIdleShutdownMs = 10000;
+const bool enableCameraIdlePowerDown = false;
 unsigned long ledAutoOffAtMs = 0;
 const unsigned long ledAutoOffTimeoutMs = 15000;
+unsigned long lastOwnerSwitchMs = 0;
+unsigned long lastOwnerSwitchCooldownMs = 1200;
 String activeViewerToken;
+String reservedViewerToken;
+unsigned long reservedViewerUntilMs = 0;
 const uint32_t cpuFreqActiveMHz = 240;
 const uint32_t cpuFreqIdleMHz = 160;
 std::atomic<bool> highPerformanceMode{false};
 std::atomic<int> streamLoopCount{0};
 std::atomic<uint32_t> streamOwnerEpoch{0};
+std::atomic<unsigned long> streamActivityHeartbeatMs{0};
 const TickType_t serverTaskDelayActiveTicks = pdMS_TO_TICKS(4);
 const TickType_t serverTaskDelayIdleTicks = pdMS_TO_TICKS(14);
+const unsigned long ownerSwitchBaseCooldownMs = 700;
+const unsigned long ownerSwitchJitterMaxMs = 900;
+const unsigned long ownerHandoffWaitMs = 1400;
+const unsigned long streamStartReservationMs = 9000;
+const unsigned long firstFrameWarmupBudgetMs = 1800;
+const int firstFrameWarmupAttempts = 4;
+const int qualityDropNoFrameThreshold = 2;
+std::atomic<int> consecutiveNoFrameFailures{0};
+
+unsigned long nextOwnerSwitchCooldownMs() {
+  uint32_t jitterMs = esp_random() % ownerSwitchJitterMaxMs;
+  return ownerSwitchBaseCooldownMs + jitterMs;
+}
 
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
-const BaseType_t uiLedCore = ARDUINO_RUNNING_CORE;
+const BaseType_t controlCore = ARDUINO_RUNNING_CORE;
 const BaseType_t streamCore = ARDUINO_RUNNING_CORE;
-const BaseType_t housekeepingCore = ARDUINO_RUNNING_CORE;
 #else
-const BaseType_t uiLedCore = ARDUINO_RUNNING_CORE;
-const BaseType_t streamCore = (ARDUINO_RUNNING_CORE == 0) ? 1 : 0;
-const BaseType_t housekeepingCore = (ARDUINO_RUNNING_CORE == 0) ? 1 : 0;
+const BaseType_t controlCore = 0;
+const BaseType_t streamCore = 1;
 #endif
 
 void scheduleNoViewerPowerDownLocked();
+
+void clearStreamReservationLocked() {
+  reservedViewerToken = "";
+  reservedViewerUntilMs = 0;
+}
+
+void reserveViewerForStartLocked(const String &viewerToken) {
+  reservedViewerToken = viewerToken;
+  reservedViewerUntilMs = millis() + streamStartReservationMs;
+}
+
+bool isReservationActiveLocked(const String &viewerToken) {
+  if (reservedViewerToken.length() == 0 || reservedViewerToken != viewerToken) {
+    return false;
+  }
+  if ((long)(millis() - reservedViewerUntilMs) > 0) {
+    clearStreamReservationLocked();
+    return false;
+  }
+  return true;
+}
+
+framesize_t lowerFrameSize(framesize_t current) {
+  if (current == FRAMESIZE_SVGA) {
+    return FRAMESIZE_VGA;
+  }
+  if (current == FRAMESIZE_VGA) {
+    return FRAMESIZE_QVGA;
+  }
+  return FRAMESIZE_QVGA;
+}
+
+bool stepDownQualityIfNeeded() {
+  framesize_t currentFrameSize = FRAMESIZE_VGA;
+  getCameraStreamConfig(currentFrameSize);
+  framesize_t nextFrameSize = lowerFrameSize(currentFrameSize);
+  if (nextFrameSize == currentFrameSize) {
+    return false;
+  }
+
+  bool wasActive = cameraActive.load(std::memory_order_relaxed);
+  if (wasActive) {
+    shutdownCamera();
+  }
+  setCameraStreamConfig(nextFrameSize);
+  bool ok = initCamera();
+  if (!ok) {
+    setCameraStreamConfig(currentFrameSize);
+    ok = initCamera();
+  }
+  if (ok && !wasActive) {
+    shutdownCamera();
+  }
+  return ok;
+}
+
+bool warmupFirstFrameWithRecovery() {
+  for (int attempt = 0; attempt < firstFrameWarmupAttempts; ++attempt) {
+    unsigned long startMs = millis();
+    while ((unsigned long)(millis() - startMs) < firstFrameWarmupBudgetMs) {
+      camera_fb_t *fb = esp_camera_fb_get();
+      if (fb != nullptr) {
+        esp_camera_fb_return(fb);
+        consecutiveNoFrameFailures.store(0, std::memory_order_relaxed);
+        return true;
+      }
+      delay(20);
+    }
+
+    shutdownCamera();
+    if (!initCamera()) {
+      continue;
+    }
+  }
+
+  int failures = consecutiveNoFrameFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (failures >= qualityDropNoFrameThreshold) {
+    if (stepDownQualityIfNeeded()) {
+      consecutiveNoFrameFailures.store(0, std::memory_order_relaxed);
+    }
+  }
+  return false;
+}
 
 bool lockState(TickType_t timeoutTicks = pdMS_TO_TICKS(50)) {
   if (stateMutex == nullptr) {
@@ -74,8 +175,9 @@ bool getLedEnabledSnapshot() {
   return ledEnabled.load(std::memory_order_relaxed);
 }
 
-void buildStatusJson(char *out, size_t outSize, bool busy, bool ledOn) {
-  snprintf(out, outSize, "{\"busy\":%s,\"led\":\"%s\"}", busy ? "true" : "false", ledOn ? "on" : "off");
+void buildStatusJson(char *out, size_t outSize, bool busy, bool stale, bool active, unsigned long lastSeenMs, bool ledOn) {
+  snprintf(out, outSize, "{\"busy\":%s,\"stale\":%s,\"active\":%s,\"lastSeenMs\":%lu,\"led\":\"%s\"}",
+           busy ? "true" : "false", stale ? "true" : "false", active ? "true" : "false", lastSeenMs, ledOn ? "on" : "off");
 }
 
 void buildLedJson(char *out, size_t outSize, bool ledOn) {
@@ -132,6 +234,7 @@ bool hasActiveViewerSessionLocked() {
   if ((unsigned long)(millis() - activeViewerLastSeenMs) > viewerHoldTimeoutMs) {
     releaseViewerLock();
     activeViewerToken = "";
+    clearStreamReservationLocked();
     scheduleNoViewerPowerDownLocked();
     return false;
   }
@@ -140,6 +243,11 @@ bool hasActiveViewerSessionLocked() {
 }
 
 void scheduleNoViewerPowerDownLocked() {
+  if (!enableCameraIdlePowerDown) {
+    cameraShutdownAtMs = 0;
+    return;
+  }
+
   const unsigned long deadlineMs = millis() + cameraIdleShutdownMs;
 
   if (cameraActive.load(std::memory_order_relaxed) && cameraShutdownAtMs == 0) {
@@ -165,6 +273,7 @@ bool validateViewerSessionLocked() {
   if ((unsigned long)(millis() - activeViewerLastSeenMs) > viewerHoldTimeoutMs) {
     releaseViewerLock();
     activeViewerToken = "";
+    clearStreamReservationLocked();
     scheduleNoViewerPowerDownLocked();
     return false;
   }
@@ -190,27 +299,39 @@ bool isViewerTokenAllowed(const String &viewerToken) {
   return allowed;
 }
 
-bool isViewerBusyForToken(const String &viewerToken) {
+void getViewerStatusSnapshotForToken(const String &viewerToken, bool &busy, bool &stale, bool &active, unsigned long &lastSeenMs) {
+  busy = true;
+  stale = false;
+  active = false;
+  lastSeenMs = 0;
+
   if (!lockState()) {
-    return true;
+    return;
   }
 
-  bool busy = false;
+  busy = false;
   if (validateViewerSessionLocked()) {
-    busy = (activeViewerToken != viewerToken);
+    active = (activeViewerToken == viewerToken);
+    unsigned long streamBeatMs = streamActivityHeartbeatMs.load(std::memory_order_relaxed);
+    unsigned long latestSeenMs = (streamBeatMs > activeViewerLastSeenMs) ? streamBeatMs : activeViewerLastSeenMs;
+    lastSeenMs = (latestSeenMs == 0) ? 0 : (unsigned long)(millis() - latestSeenMs);
+    stale = (lastSeenMs > 2500);
+    bool hasRunningStream = (streamLoopCount.load(std::memory_order_relaxed) > 0);
+    busy = (!active && !stale && hasRunningStream);
   }
 
   unlockState();
-  return busy;
 }
 
 void handleRoot() {
-  if (server.hasArg("takeover")) {
+  if (server.hasArg("claim") || server.hasArg("takeover")) {
     String viewerToken = server.arg("viewer");
     if (viewerToken.length() == 0) {
       server.send(400, "text/plain", "Missing viewer token");
       return;
     }
+
+    bool forceTakeover = server.hasArg("force") || server.hasArg("takeover");
 
     if (!lockState(pdMS_TO_TICKS(500))) {
       server.send(503, "text/plain", "State busy");
@@ -218,19 +339,86 @@ void handleRoot() {
     }
 
     IPAddress remote = server.client().remoteIP();
-    bool ownerChanged = (activeViewerToken != viewerToken);
+    unsigned long nowMs = millis();
+
+    bool hasActiveSession = validateViewerSessionLocked();
+    bool tokenOwnsSession = hasActiveSession && (activeViewerToken == viewerToken);
+    bool ownerChanged = false;
+
+    if (!hasActiveSession || tokenOwnsSession) {
+      ownerChanged = (!hasActiveSession || activeViewerToken != viewerToken);
+      activeViewerIp = remote;
+      activeViewerToken = viewerToken;
+      activeViewerLastSeenMs = nowMs;
+      reserveViewerForStartLocked(viewerToken);
+      cancelNoViewerPowerDownLocked();
+      setPerformanceModeLocked(true);
+      if (ownerChanged) {
+        lastOwnerSwitchMs = nowMs;
+        lastOwnerSwitchCooldownMs = nextOwnerSwitchCooldownMs();
+        streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed);
+      }
+      unlockState();
+      server.sendHeader("Cache-Control", "no-store");
+      server.send(200, "application/json", "{\"ok\":true,\"decision\":\"join\"}");
+      return;
+    }
+
+    unsigned long streamBeatMs = streamActivityHeartbeatMs.load(std::memory_order_relaxed);
+    unsigned long latestSeenMs = (streamBeatMs > activeViewerLastSeenMs) ? streamBeatMs : activeViewerLastSeenMs;
+    unsigned long inactivityMs = (latestSeenMs == 0) ? 0 : (unsigned long)(nowMs - latestSeenMs);
+    bool staleSession = (inactivityMs > 2500);
+    bool hasRunningStream = (streamLoopCount.load(std::memory_order_relaxed) > 0);
+    bool allowTakeover = forceTakeover || staleSession || !hasRunningStream;
+    if (!allowTakeover) {
+      unlockState();
+      server.sendHeader("Cache-Control", "no-store");
+      server.send(423, "application/json", "{\"ok\":false,\"busy\":true}");
+      return;
+    }
+
+    unsigned long cooldownMs = (lastOwnerSwitchCooldownMs == 0) ? ownerSwitchBaseCooldownMs : lastOwnerSwitchCooldownMs;
+    if (lastOwnerSwitchMs != 0) {
+      unsigned long sinceLastSwitchMs = (unsigned long)(nowMs - lastOwnerSwitchMs);
+      if (sinceLastSwitchMs < cooldownMs) {
+        unsigned long retryMs = cooldownMs - sinceLastSwitchMs;
+        unlockState();
+        char json[64];
+        snprintf(json, sizeof(json), "{\"ok\":false,\"retryMs\":%lu}", retryMs);
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(429, "application/json", json);
+        return;
+      }
+    }
+
     activeViewerIp = remote;
     activeViewerToken = viewerToken;
-    activeViewerLastSeenMs = millis();
+    activeViewerLastSeenMs = nowMs;
+    reserveViewerForStartLocked(viewerToken);
     cancelNoViewerPowerDownLocked();
     setPerformanceModeLocked(true);
-    if (ownerChanged) {
-      streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed);
-    }
+    lastOwnerSwitchMs = nowMs;
+    lastOwnerSwitchCooldownMs = nextOwnerSwitchCooldownMs();
+    streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed);
     unlockState();
 
+    unsigned long handoffStartMs = millis();
+    while (streamLoopCount.load(std::memory_order_relaxed) > 0 && (unsigned long)(millis() - handoffStartMs) < ownerHandoffWaitMs) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    int activeLoopsAfterWait = streamLoopCount.load(std::memory_order_relaxed);
+    if (activeLoopsAfterWait > 0 && !forceTakeover) {
+      unsigned long retryMs = 250 + (esp_random() % 550);
+      char json[64];
+      snprintf(json, sizeof(json), "{\"ok\":false,\"retryMs\":%lu}", retryMs);
+      server.sendHeader("Cache-Control", "no-store");
+      server.send(429, "application/json", json);
+      return;
+    }
+
     server.sendHeader("Cache-Control", "no-store");
-    server.send(200, "application/json", "{\"ok\":true}");
+    server.send(200, "application/json", "{\"ok\":true,\"decision\":\"takeover\"}");
     return;
   }
 
@@ -331,9 +519,13 @@ void handleRoot() {
 
   if (server.hasArg("status")) {
     String viewerToken = server.arg("viewer");
-    bool busy = isViewerBusyForToken(viewerToken);
-    char json[40];
-    buildStatusJson(json, sizeof(json), busy, getLedEnabledSnapshot());
+    bool busy = false;
+    bool stale = false;
+    bool active = false;
+    unsigned long lastSeenMs = 0;
+    getViewerStatusSnapshotForToken(viewerToken, busy, stale, active, lastSeenMs);
+    char json[112];
+    buildStatusJson(json, sizeof(json), busy, stale, active, lastSeenMs, getLedEnabledSnapshot());
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", json);
     return;
@@ -384,13 +576,46 @@ void handleStreamRoot() {
     return;
   }
 
+  bool tokenActive = false;
+  if (validateViewerSessionLocked()) {
+    if (activeViewerToken == viewerToken) {
+      tokenActive = true;
+    } else if (isReservationActiveLocked(viewerToken)) {
+      activeViewerToken = viewerToken;
+      activeViewerIp = streamServer.client().remoteIP();
+      activeViewerLastSeenMs = millis();
+      tokenActive = true;
+    }
+  }
+  if (!tokenActive) {
+    if (isReservationActiveLocked(viewerToken)) {
+      clearStreamReservationLocked();
+    }
+    unlockState();
+    unlockCameraOp();
+    streamServer.send(423, "text/plain", "Ktos aktualnie korzysta z podgladu");
+    return;
+  }
+
   bool needInit = !cameraActive.load(std::memory_order_relaxed);
   unlockState();
 
   if (needInit && !initCamera()) {
+    if (lockState(pdMS_TO_TICKS(50))) {
+      clearStreamReservationLocked();
+      unlockState();
+    }
     unlockCameraOp();
     streamServer.send(503, "text/plain", "Camera wakeup failed");
     return;
+  }
+
+  if (!warmupFirstFrameWithRecovery()) {
+    // Non-fatal: continue and let stream loop try to recover frames.
+    if (lockState(pdMS_TO_TICKS(50))) {
+      clearStreamReservationLocked();
+      unlockState();
+    }
   }
 
   if (!lockState(pdMS_TO_TICKS(1000))) {
@@ -399,27 +624,117 @@ void handleStreamRoot() {
     return;
   }
 
-  bool ownerChanged = (activeViewerToken != viewerToken);
-  int activeLoops = streamLoopCount.load(std::memory_order_relaxed);
-  if (!ownerChanged && activeLoops > 0) {
-    activeViewerLastSeenMs = millis();
+  tokenActive = false;
+  if (validateViewerSessionLocked()) {
+    if (activeViewerToken == viewerToken) {
+      tokenActive = true;
+    } else if (isReservationActiveLocked(viewerToken)) {
+      activeViewerToken = viewerToken;
+      activeViewerIp = streamServer.client().remoteIP();
+      activeViewerLastSeenMs = millis();
+      tokenActive = true;
+    }
+  }
+  if (!tokenActive) {
+    if (isReservationActiveLocked(viewerToken)) {
+      clearStreamReservationLocked();
+    }
     unlockState();
     unlockCameraOp();
-    streamServer.send(409, "text/plain", "Stream already active");
+    streamServer.send(423, "text/plain", "Ktos aktualnie korzysta z podgladu");
     return;
+  }
+
+  unsigned long nowMs = millis();
+  int activeLoops = streamLoopCount.load(std::memory_order_relaxed);
+  if (activeLoops > 0) {
+    unsigned long waitStartMs = millis();
+    while (streamLoopCount.load(std::memory_order_relaxed) > 0 && (unsigned long)(millis() - waitStartMs) < 5000) {
+      unlockState();
+      unlockCameraOp();
+      delay(10);
+      if (!lockCameraOp(pdMS_TO_TICKS(200))) {
+        streamServer.send(503, "text/plain", "Camera operation busy");
+        return;
+      }
+      if (!lockState(pdMS_TO_TICKS(200))) {
+        unlockCameraOp();
+        streamServer.send(503, "text/plain", "Stream state busy");
+        return;
+      }
+      if (!validateViewerSessionLocked() || activeViewerToken != viewerToken) {
+        unlockState();
+        unlockCameraOp();
+        streamServer.send(423, "text/plain", "Ktos aktualnie korzysta z podgladu");
+        return;
+      }
+    }
+
+    activeLoops = streamLoopCount.load(std::memory_order_relaxed);
+    if (activeLoops > 0) {
+      activeViewerLastSeenMs = nowMs;
+      unlockState();
+      unlockCameraOp();
+      streamServer.send(409, "text/plain", "Stream already active");
+      return;
+    }
   }
 
   cancelNoViewerPowerDownLocked();
   setPerformanceModeLocked(true);
-  IPAddress remote = streamServer.client().remoteIP();
-  activeViewerIp = remote;
-  activeViewerToken = viewerToken;
-  activeViewerLastSeenMs = millis();
-  uint32_t myEpoch = ownerChanged
-    ? (streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed) + 1)
-    : streamOwnerEpoch.load(std::memory_order_relaxed);
+  activeViewerLastSeenMs = nowMs;
+  clearStreamReservationLocked();
+  uint32_t myEpoch = streamOwnerEpoch.load(std::memory_order_relaxed);
   unlockState();
   unlockCameraOp();
+
+  camera_fb_t *firstFrame = nullptr;
+  auto tryGetFirstFrame = [&](unsigned long budgetMs) -> camera_fb_t * {
+    camera_fb_t *fb = nullptr;
+    unsigned long startMs = millis();
+    while (fb == nullptr && (unsigned long)(millis() - startMs) < budgetMs) {
+      fb = esp_camera_fb_get();
+      if (fb == nullptr) {
+        delay(16);
+      }
+    }
+    return fb;
+  };
+
+  firstFrame = tryGetFirstFrame(6000);
+
+  if (firstFrame == nullptr) {
+    shutdownCamera();
+    if (initCamera()) {
+      firstFrame = tryGetFirstFrame(4000);
+    }
+  }
+
+  if (firstFrame == nullptr) {
+    framesize_t currentFrameSize = FRAMESIZE_VGA;
+    getCameraStreamConfig(currentFrameSize);
+    if (currentFrameSize != FRAMESIZE_QVGA) {
+      shutdownCamera();
+      setCameraStreamConfig(FRAMESIZE_QVGA);
+      if (initCamera()) {
+        firstFrame = tryGetFirstFrame(4000);
+      }
+    }
+  }
+
+  if (firstFrame == nullptr) {
+    if (lockState(pdMS_TO_TICKS(80))) {
+      if (activeViewerToken == viewerToken) {
+        releaseViewerLock();
+        activeViewerToken = "";
+        clearStreamReservationLocked();
+        scheduleNoViewerPowerDownLocked();
+      }
+      unlockState();
+    }
+    streamServer.send(503, "text/plain", "Camera no frame after recovery");
+    return;
+  }
 
   WiFiClient client = streamServer.client();
   client.setNoDelay(true);
@@ -437,7 +752,8 @@ void handleStreamRoot() {
   int noFrameStreak = 0;
   const int maxSkipThreshold = 3;
   const unsigned long maxFrameSendMs = 90;
-  const int maxNoFrameStreak = 30;
+  const int maxNoFrameStreak = 300;
+  bool noFrameFailure = false;
   streamLoopCount.fetch_add(1, std::memory_order_relaxed);
 
   unsigned long handoffStartMs = millis();
@@ -446,14 +762,33 @@ void handleStreamRoot() {
   }
   if (streamLoopCount.load(std::memory_order_relaxed) > 1) {
     streamLoopCount.fetch_sub(1, std::memory_order_relaxed);
+    if (firstFrame != nullptr) {
+      esp_camera_fb_return(firstFrame);
+    }
     client.stop();
     return;
+  }
+
+  if (firstFrame != nullptr) {
+    size_t firstFrameLen = firstFrame->len;
+    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned int)firstFrameLen);
+    size_t firstWritten = client.write(firstFrame->buf, firstFrameLen);
+    client.print("\r\n");
+    esp_camera_fb_return(firstFrame);
+    if (firstWritten != firstFrameLen) {
+      streamLoopCount.fetch_sub(1, std::memory_order_relaxed);
+      client.stop();
+      return;
+    }
+    streamActivityHeartbeatMs.store(millis(), std::memory_order_relaxed);
   }
   
   while (client.connected()) {
     if (streamOwnerEpoch.load(std::memory_order_relaxed) != myEpoch) {
       break;
     }
+
+    streamActivityHeartbeatMs.store(millis(), std::memory_order_relaxed);
 
     if (skippedFrames > 0) {
       camera_fb_t *fb = esp_camera_fb_get();
@@ -464,6 +799,7 @@ void handleStreamRoot() {
       } else {
         noFrameStreak++;
         if (noFrameStreak >= maxNoFrameStreak) {
+          noFrameFailure = true;
           break;
         }
       }
@@ -475,11 +811,13 @@ void handleStreamRoot() {
     if (!fb) {
       noFrameStreak++;
       if (noFrameStreak >= maxNoFrameStreak) {
+        noFrameFailure = true;
         break;
       }
       delay(10);
       continue;
     }
+    consecutiveNoFrameFailures.store(0, std::memory_order_relaxed);
     noFrameStreak = 0;
 
     size_t frameLen = fb->len;
@@ -507,20 +845,36 @@ void handleStreamRoot() {
       }
       lastKeepAliveMs = nowMs;
     }
-
     delay(0);
   }
+
+  client.stop();
 
   if (lockState(pdMS_TO_TICKS(200))) {
     if (activeViewerToken == viewerToken && streamOwnerEpoch.load(std::memory_order_relaxed) == myEpoch) {
       releaseViewerLock();
       activeViewerToken = "";
+      clearStreamReservationLocked();
       scheduleNoViewerPowerDownLocked();
       setPerformanceModeLocked(false);
     }
     unlockState();
   }
   streamLoopCount.fetch_sub(1, std::memory_order_relaxed);
+
+  if (noFrameFailure) {
+    int failures = consecutiveNoFrameFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (failures >= qualityDropNoFrameThreshold) {
+      if (lockCameraOp(pdMS_TO_TICKS(400))) {
+        if (streamLoopCount.load(std::memory_order_relaxed) == 0) {
+          if (stepDownQualityIfNeeded()) {
+            consecutiveNoFrameFailures.store(0, std::memory_order_relaxed);
+          }
+        }
+        unlockCameraOp();
+      }
+    }
+  }
 }
 
 void handleLedRoot() {
@@ -528,9 +882,13 @@ void handleLedRoot() {
 
   if (ledServer.hasArg("status")) {
     String viewerToken = ledServer.arg("viewer");
-    bool busy = isViewerBusyForToken(viewerToken);
-    char json[40];
-    buildStatusJson(json, sizeof(json), busy, getLedEnabledSnapshot());
+    bool busy = false;
+    bool stale = false;
+    bool active = false;
+    unsigned long lastSeenMs = 0;
+    getViewerStatusSnapshotForToken(viewerToken, busy, stale, active, lastSeenMs);
+    char json[112];
+    buildStatusJson(json, sizeof(json), busy, stale, active, lastSeenMs, getLedEnabledSnapshot());
     ledServer.send(200, "application/json", json);
     return;
   }
@@ -626,59 +984,6 @@ void streamServerTask(void *pvParameters) {
   }
 }
 
-void housekeepingTask(void *pvParameters) {
-  (void)pvParameters;
-  while (true) {
-    bool shouldShutdown = false;
-    bool shouldTurnOffLedByTimeout = false;
-
-    if (lockState()) {
-      bool hasViewer = hasActiveViewerSessionLocked();
-
-      if (cameraActive.load(std::memory_order_relaxed) && cameraShutdownAtMs != 0 && activeViewerIp[0] == 0) {
-        if ((long)(millis() - cameraShutdownAtMs) >= 0) {
-          shouldShutdown = true;
-          cameraShutdownAtMs = 0;
-        }
-      }
-
-      if (ledEnabled.load(std::memory_order_relaxed) && ledAutoOffAtMs != 0) {
-        if ((long)(millis() - ledAutoOffAtMs) >= 0) {
-          shouldTurnOffLedByTimeout = true;
-          ledAutoOffAtMs = 0;
-        }
-      }
-
-      if (highPerformanceMode.load(std::memory_order_relaxed) && !hasViewer) {
-        setPerformanceModeLocked(false);
-      }
-      unlockState();
-    }
-
-    if (shouldTurnOffLedByTimeout) {
-      if (lockState(pdMS_TO_TICKS(200))) {
-        setFlashLed(false);
-        unlockState();
-      }
-    }
-
-    if (shouldShutdown) {
-      if (lockCameraOp(pdMS_TO_TICKS(1000))) {
-        if (lockState(pdMS_TO_TICKS(1000))) {
-          if (!hasActiveViewerSessionLocked() && cameraActive.load(std::memory_order_relaxed)) {
-            shutdownCamera();
-            setPerformanceModeLocked(false);
-          }
-          unlockState();
-        }
-        unlockCameraOp();
-      }
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
 void failSetupAndRestart() {
   setFlashLed(true);
   delay(250);
@@ -707,6 +1012,7 @@ void setup() {
 
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
 
   stateMutex = xSemaphoreCreateMutex();
   cameraOpMutex = xSemaphoreCreateMutex();
@@ -716,7 +1022,7 @@ void setup() {
 
   if (!initCamera()) {
     blinkCameraInitErrorPattern();
-  } else {
+  } else if (enableCameraIdlePowerDown) {
     shutdownCamera();
   }
 
@@ -727,11 +1033,12 @@ void setup() {
 
   startWebServer();
 
-  BaseType_t uiTaskOk = xTaskCreatePinnedToCore(uiServerTask, "uiServerTask", 4096, nullptr, 1, nullptr, uiLedCore);
-  BaseType_t ledTaskOk = xTaskCreatePinnedToCore(ledServerTask, "ledServerTask", 4096, nullptr, 1, nullptr, uiLedCore);
+  streamActivityHeartbeatMs.store(millis(), std::memory_order_relaxed);
+
+  BaseType_t uiTaskOk = xTaskCreatePinnedToCore(uiServerTask, "uiServerTask", 4096, nullptr, 1, nullptr, controlCore);
+  BaseType_t ledTaskOk = xTaskCreatePinnedToCore(ledServerTask, "ledServerTask", 4096, nullptr, 1, nullptr, controlCore);
   BaseType_t streamTaskOk = xTaskCreatePinnedToCore(streamServerTask, "streamServerTask", 6144, nullptr, 2, nullptr, streamCore);
-  BaseType_t housekeepingTaskOk = xTaskCreatePinnedToCore(housekeepingTask, "housekeepingTask", 3072, nullptr, 1, nullptr, housekeepingCore);
-  if (uiTaskOk != pdPASS || ledTaskOk != pdPASS || streamTaskOk != pdPASS || housekeepingTaskOk != pdPASS) {
+  if (uiTaskOk != pdPASS || ledTaskOk != pdPASS || streamTaskOk != pdPASS) {
     failSetupAndRestart();
   }
 }

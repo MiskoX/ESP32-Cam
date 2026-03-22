@@ -50,6 +50,15 @@ body {
   line-height: 1.4;
   max-width: 36ch;
 }
+.takeoverBtn {
+  display: none;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #f6cc3b;
+  color: #111;
+  font-weight: 700;
+}
 p { opacity: 0.8; font-size: 14px; }
 #status { min-height: 1.5em; }
 .toolbar {

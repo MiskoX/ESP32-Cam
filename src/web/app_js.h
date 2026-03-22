@@ -15,6 +15,7 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
   const overlay = document.getElementById('overlay');
   const overlayMessage = document.getElementById('overlayMessage');
   const loader = document.getElementById('loader');
+  const takeoverBtn = document.getElementById('takeoverBtn');
   const ledBaseUrl = `${location.protocol}//${location.hostname}:81/`;
   const streamBaseUrl = `${location.protocol}//${location.hostname}:82/`;
   const viewerId = (globalThis.crypto && crypto.randomUUID)
@@ -24,7 +25,13 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
   let streamHadFrame = false;
   let connectHintTimer = null;
   let reconnectTimer = null;
+  let statusPollTimer = null;
+  let statusPollFailCount = 0;
+  let deviceOffline = false;
   let streamConnectAttempts = 0;
+  let pendingTakeoverForNextStart = true;
+  let awaitingManualTakeover = false;
+  let manualTakeoverInFlight = false;
   let ledRequestInFlight = false;
   let camCfgRequestInFlight = false;
   let unlockApplyOnNextFrame = false;
@@ -32,11 +39,50 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
   const ledDebounceMs = 300;
   const maxStreamConnectAttempts = 3;
   const streamRetryDelayMs = 900;
+  const statusPollMs = 1200;
+  const maxStatusPollFailuresForOffline = 4;
+  const retryJitterMaxMs = 900;
+  const firstFrameWaitMs = 12000;
+
+  if (takeoverBtn) {
+    takeoverBtn.style.display = 'none';
+  }
+
+  function setActiveViewerStatus(lastSeenMs, ledState) {
+    const lagMs = Number.isFinite(lastSeenMs) ? Math.max(0, Math.trunc(lastSeenMs)) : 0;
+    const ledText = ledState === 'on' ? 'ON' : 'OFF';
+    status.textContent = `Transmisja aktywna. Jesteś aktywnym oglądaczem. Aktywność: ${lagMs} ms. LED: ${ledText}.`;
+  }
 
   function setOverlay(message, showSpinner) {
     overlay.style.display = (message || showSpinner) ? 'flex' : 'none';
     overlayMessage.textContent = message || '';
     loader.style.display = showSpinner ? 'block' : 'none';
+    if (showSpinner && takeoverBtn) {
+      takeoverBtn.style.display = 'none';
+      takeoverBtn.disabled = false;
+    }
+    if (!message && !showSpinner) {
+      if (takeoverBtn) {
+        takeoverBtn.style.display = 'none';
+        takeoverBtn.disabled = false;
+      }
+    }
+  }
+
+  function showManualTakeoverPrompt(message) {
+    awaitingManualTakeover = true;
+    pendingTakeoverForNextStart = false;
+    manualTakeoverInFlight = false;
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    setOverlay(message, false);
+    if (takeoverBtn) {
+      takeoverBtn.style.display = 'inline-flex';
+      takeoverBtn.disabled = false;
+    }
   }
 
   function hidePreviewWithMessage(message) {
@@ -64,32 +110,144 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
     setOverlay('', false);
   }
 
-  async function claimTakeover() {
+  function setOfflineUi() {
+    status.textContent = 'Kamera offline. Czekam na powrót połączenia...';
+    setOverlay('Kamera offline. Próba ponownego połączenia...', true);
+  }
+
+  async function pollStatus() {
+    if (camCfgRequestInFlight) {
+      return;
+    }
+
     try {
-      await fetch(`/?takeover=1&viewer=${encodeURIComponent(viewerId)}&t=${Date.now()}`, { cache: 'no-store' });
+      const response = await fetch(
+        `/?status=1&viewer=${encodeURIComponent(viewerId)}&t=${Date.now()}`,
+        { cache: 'no-store' }
+      );
+      if (!response.ok) {
+        statusPollFailCount += 1;
+        if (statusPollFailCount >= maxStatusPollFailuresForOffline && !deviceOffline) {
+          deviceOffline = true;
+          stopStream();
+          setOfflineUi();
+        }
+        return;
+      }
+
+      statusPollFailCount = 0;
+      if (deviceOffline) {
+        deviceOffline = false;
+        streamConnectAttempts = 0;
+        setOverlay('Kamera wróciła online. Łączenie...', true);
+        status.textContent = 'Kamera wróciła online. Trwa łączenie...';
+        if (!streamRunning && reconnectTimer === null) {
+          startStream();
+        }
+      }
+
+      const data = await response.json();
+      if (!data) {
+        return;
+      }
+
+      if (data.busy === true && streamHadFrame) {
+        stopStream();
+        status.textContent = 'Sesja zostala przejeta przez innego uzytkownika.';
+        showManualTakeoverPrompt('Twoja sesja została przejęta przez innego użytkownika. Kliknij przycisk, aby przejąć kamerę.');
+        return;
+      }
+
+      if (data.busy === true && !streamHadFrame && streamRunning && reconnectTimer === null) {
+        stopStream();
+        status.textContent = 'Kamera jest aktualnie zajęta przez innego użytkownika.';
+        showManualTakeoverPrompt('Kamera jest aktualnie używana przez innego klienta. Kliknij przycisk, aby przejąć kamerę.');
+        return;
+      }
+
+      if (data.stale === true && streamRunning && streamHadFrame && reconnectTimer === null) {
+        setOverlay('Brak nowych klatek. Przywracam transmisję...', true);
+        scheduleStreamRetry();
+        return;
+      }
+
+      if (data.active !== true && streamRunning && streamHadFrame && reconnectTimer === null) {
+        scheduleStreamRetry(1200, 'Sesja nieaktywna. Przejmuje obraz ponownie...');
+        return;
+      }
+
+      if (data.active === true && streamRunning) {
+        setActiveViewerStatus(data.lastSeenMs, data.led);
+      }
     } catch (e) {
+      statusPollFailCount += 1;
+      if (statusPollFailCount >= maxStatusPollFailuresForOffline && !deviceOffline) {
+        deviceOffline = true;
+        stopStream();
+        setOfflineUi();
+      }
     }
   }
 
-  function scheduleStreamRetry() {
+  function startStatusPoll() {
+    if (statusPollTimer !== null) {
+      clearInterval(statusPollTimer);
+    }
+    statusPollTimer = setInterval(pollStatus, statusPollMs);
+  }
+
+  async function claimSession(forceTakeover) {
+    const forceFlag = forceTakeover ? '&force=1' : '';
+    try {
+      const response = await fetch(`/?claim=1&viewer=${encodeURIComponent(viewerId)}${forceFlag}&t=${Date.now()}`, { cache: 'no-store' });
+      if (response.ok) {
+        return { ok: true, retryMs: 0, busy: false };
+      }
+
+      if (response.status === 423) {
+        return { ok: false, retryMs: 0, busy: true };
+      }
+
+      if (response.status === 429) {
+        try {
+          const data = await response.json();
+          const retryMs = (data && Number.isFinite(data.retryMs)) ? Math.max(200, Math.trunc(data.retryMs)) : streamRetryDelayMs;
+          return { ok: false, retryMs, busy: false };
+        } catch (e) {
+          return { ok: false, retryMs: streamRetryDelayMs, busy: false };
+        }
+      }
+
+      return { ok: false, retryMs: streamRetryDelayMs, busy: false };
+    } catch (e) {
+      return { ok: false, retryMs: streamRetryDelayMs, busy: false };
+    }
+  }
+
+  function scheduleStreamRetry(delayMs = streamRetryDelayMs, message = 'Wykryto problem z transmisja. Trwa ponowne laczenie...') {
     if (streamRunning) {
       img.removeAttribute('src');
       streamRunning = false;
     }
 
+    pendingTakeoverForNextStart = true;
+
     if (streamConnectAttempts >= maxStreamConnectAttempts) {
       setOverlay('Prawdopodobnie ktoś używa kamerki.', true);
+      status.textContent = 'Nie udalo sie przywrocic transmisji.';
       return;
     }
 
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
     }
-    setOverlay('Przejmuję sesję kamery...', true);
+    setOverlay('Przywracam transmisję...', true);
+    status.textContent = message;
+    const jitterMs = Math.floor(Math.random() * retryJitterMaxMs);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       startStream();
-    }, streamRetryDelayMs);
+    }, delayMs + jitterMs);
   }
 
   async function startStream() {
@@ -97,14 +255,39 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
       return;
     }
 
-    await claimTakeover();
+    if (deviceOffline) {
+      return;
+    }
+
+    if (pendingTakeoverForNextStart) {
+      const claim = await claimSession(awaitingManualTakeover);
+      if (!claim.ok) {
+        if (claim.busy) {
+          showManualTakeoverPrompt('Kamera jest aktualnie używana przez innego klienta. Kliknij przycisk, aby przejąć kamerę.');
+          status.textContent = 'Kamera zajęta. Przejęcie tylko po kliknięciu przycisku.';
+          return;
+        }
+        if (awaitingManualTakeover) {
+          const retryMs = (claim.retryMs && claim.retryMs > 0) ? claim.retryMs : streamRetryDelayMs;
+          showManualTakeoverPrompt('Kamera jest aktualnie używana przez innego klienta. Kliknij, aby przejąć ponownie.');
+          status.textContent = `Przejęcie nieudane. Spróbuj ponownie za około ${Math.trunc(retryMs)} ms.`;
+          return;
+        }
+        const retryMs = (claim.retryMs && claim.retryMs > 0) ? claim.retryMs : streamRetryDelayMs;
+        scheduleStreamRetry(retryMs, 'Stabilizuję sesję na serwerze. Ponawiam...');
+        return;
+      }
+      pendingTakeoverForNextStart = false;
+    }
 
     if (streamRunning) {
       return;
     }
 
+    streamHadFrame = false;
     streamConnectAttempts += 1;
     setOverlay('Łączenie z kamerą...', true);
+    status.textContent = 'Łączenie z kamerą...';
     img.style.display = 'block';
     img.src = streamBaseUrl + '?stream=1&viewer=' + encodeURIComponent(viewerId) + '&t=' + Date.now();
     streamRunning = true;
@@ -114,9 +297,19 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
     }
     connectHintTimer = setTimeout(() => {
       if (streamRunning) {
-        scheduleStreamRetry();
+        if (!streamHadFrame) {
+          if (!awaitingManualTakeover && streamConnectAttempts < 2) {
+            scheduleStreamRetry(2200, 'Słaby sygnał. Ponawiam połączenie z kamerą...');
+            return;
+          }
+          stopStream();
+          showManualTakeoverPrompt('Nie udało się uruchomić obrazu. Kliknij przycisk, aby przejąć kamerę.');
+          status.textContent = 'Urządzenie zajęte lub słaby sygnał. Kliknij przycisk.';
+        } else {
+          scheduleStreamRetry();
+        }
       }
-    }, 3500);
+    }, firstFrameWaitMs);
   }
 
   async function toggleLed() {
@@ -290,12 +483,15 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
     }
     streamConnectAttempts = 0;
     streamHadFrame = true;
+    pendingTakeoverForNextStart = false;
+    awaitingManualTakeover = false;
+    manualTakeoverInFlight = false;
     setOverlay('', false);
     if (unlockApplyOnNextFrame) {
       unlockApplyOnNextFrame = false;
       applyCamBtn.disabled = false;
     }
-    status.textContent = '';
+    setActiveViewerStatus(0, 'off');
     toolbar.style.display = 'flex';
   };
 
@@ -305,15 +501,32 @@ static const char kAppJs[] PROGMEM = R"JS((() => {
       applyCamBtn.disabled = false;
     }
 
-    if (streamHadFrame) {
-      stopStream();
-      hidePreviewWithMessage('Twoja sesja została przejęta przez innego użytkownika.');
+    if (awaitingManualTakeover || !streamHadFrame) {
+      manualTakeoverInFlight = false;
+      showManualTakeoverPrompt('Kamera jest zajęta lub niedostępna. Kliknij przycisk, aby przejąć kamerę.');
+      status.textContent = 'Przejęcie działa tylko po kliknięciu przycisku.';
       return;
     }
-
     scheduleStreamRetry();
   };
 
+  if (takeoverBtn) {
+    takeoverBtn.addEventListener('click', () => {
+      if (manualTakeoverInFlight) {
+        return;
+      }
+      manualTakeoverInFlight = true;
+      awaitingManualTakeover = true;
+      pendingTakeoverForNextStart = true;
+      streamConnectAttempts = 0;
+      takeoverBtn.disabled = true;
+      setOverlay('Przejmuję kamerę...', true);
+      status.textContent = 'Próba przejęcia kamery...';
+      startStream();
+    });
+  }
+
+  startStatusPoll();
   startStream();
   loadCamConfig();
   updateFullscreenButtonLabel();
