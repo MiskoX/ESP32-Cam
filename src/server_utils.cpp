@@ -3,6 +3,7 @@
 #include <esp32-hal-cpu.h>
 #include <esp_system.h>
 #include <stdio.h>
+#include <freertos/task.h>
 
 #include "camera_runtime.h"
 #include "main_state.h"
@@ -77,7 +78,7 @@ bool streamWarmupFirstFrameWithRecovery() {
         consecutiveNoFrameFailures.store(0, std::memory_order_relaxed);
         return true;
       }
-      delay(20);
+      vTaskDelay(pdMS_TO_TICKS(20));
     }
 
     shutdownCamera();

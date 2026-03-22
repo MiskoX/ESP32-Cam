@@ -79,9 +79,9 @@ void streamServerTask(void *pvParameters) {
 
 void failSetupAndRestart() {
   setFlashLed(true);
-  delay(250);
+  vTaskDelay(pdMS_TO_TICKS(250));
   setFlashLed(false);
-  delay(1500);
+  vTaskDelay(pdMS_TO_TICKS(1500));
   ESP.restart();
 }
 
@@ -143,7 +143,7 @@ void runHousekeepingTick() {
 }
 
 void setup() {
-  delay(1000);
+  vTaskDelay(pdMS_TO_TICKS(1000));
 
   pinMode(FLASH_LED_GPIO_NUM, OUTPUT);
   setFlashLed(false);
@@ -156,7 +156,7 @@ void setup() {
 
   bool ok = wm.autoConnect("ESP32CAM-Setup");
   if (!ok) {
-    delay(3000);
+    vTaskDelay(pdMS_TO_TICKS(3000));
     ESP.restart();
   }
 

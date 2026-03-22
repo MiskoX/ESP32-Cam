@@ -319,7 +319,7 @@ void streamHandleRoot() {
         esp_camera_fb_return(warmupFrame);
         break;
       }
-      delay(20);
+      vTaskDelay(pdMS_TO_TICKS(20));
     }
   } else {
     if (!streamWarmupFirstFrameWithRecovery()) {
@@ -365,7 +365,7 @@ void streamHandleRoot() {
     while (streamLoopCount.load(std::memory_order_relaxed) > 0 && (unsigned long)(millis() - waitStartMs) < 5000) {
       sessionUnlockState();
       streamUnlockCameraOp();
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
       if (!streamLockCameraOp(pdMS_TO_TICKS(200))) {
         streamServer.send(503, "text/plain", "Camera operation busy");
         return;
@@ -407,7 +407,7 @@ void streamHandleRoot() {
     while (fb == nullptr && (unsigned long)(millis() - startMs) < budgetMs) {
       fb = esp_camera_fb_get();
       if (fb == nullptr) {
-        delay(16);
+        vTaskDelay(pdMS_TO_TICKS(16));
       }
     }
     return fb;
@@ -473,7 +473,7 @@ void streamHandleRoot() {
 
   unsigned long handoffStartMs = millis();
   while (streamLoopCount.load(std::memory_order_relaxed) > 1 && (unsigned long)(millis() - handoffStartMs) < 2500) {
-    delay(2);
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
   if (streamLoopCount.load(std::memory_order_relaxed) > 1) {
     streamLoopCount.fetch_sub(1, std::memory_order_relaxed);
@@ -518,7 +518,7 @@ void streamHandleRoot() {
           break;
         }
       }
-      delay(0);
+      taskYIELD();
       continue;
     }
 
@@ -529,7 +529,7 @@ void streamHandleRoot() {
         noFrameFailure = true;
         break;
       }
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
     consecutiveNoFrameFailures.store(0, std::memory_order_relaxed);
@@ -560,7 +560,7 @@ void streamHandleRoot() {
       }
       lastKeepAliveMs = nowMs;
     }
-    delay(0);
+    taskYIELD();
   }
 
   client.stop();

@@ -1,6 +1,8 @@
 #include "camera_runtime.h"
 
 #include "server_utils.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
@@ -58,10 +60,10 @@ void blinkFlashPattern(int count, uint32_t onDuty) {
   for (int i = 0; i < count; ++i) {
     ledEnabled.store(true, std::memory_order_relaxed);
     ledcWrite(kFlashLedPwmChannel, onDuty);
-    delay(kCameraBlinkOnMs);
+    vTaskDelay(pdMS_TO_TICKS(kCameraBlinkOnMs));
     ledEnabled.store(false, std::memory_order_relaxed);
     ledcWrite(kFlashLedPwmChannel, 0);
-    delay(kCameraBlinkOffMs);
+    vTaskDelay(pdMS_TO_TICKS(kCameraBlinkOffMs));
   }
   setFlashLed(previousLedState);
 }
@@ -77,11 +79,11 @@ void setFlashLed(bool on) {
 void blinkCameraInitErrorPattern() {
   for (int i = 0; i < 2; ++i) {
     setFlashLed(true);
-    delay(250);
+    vTaskDelay(pdMS_TO_TICKS(250));
     setFlashLed(false);
-    delay(250);
+    vTaskDelay(pdMS_TO_TICKS(250));
   }
-  delay(5000);
+  vTaskDelay(pdMS_TO_TICKS(5000));
 }
 
 void releaseViewerLock() {
@@ -92,7 +94,7 @@ void releaseViewerLock() {
 bool initCamera() {
   pinMode(PWDN_GPIO_NUM, OUTPUT);
   digitalWrite(PWDN_GPIO_NUM, LOW);
-  delay(20);
+  vTaskDelay(pdMS_TO_TICKS(20));
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -153,11 +155,11 @@ void shutdownCamera() {
   esp_camera_deinit();
   cameraActive.store(false, std::memory_order_relaxed);
   serverSetPerformanceModeLocked(false);
-  delay(10);
+  vTaskDelay(pdMS_TO_TICKS(10));
 
   pinMode(PWDN_GPIO_NUM, OUTPUT);
   digitalWrite(PWDN_GPIO_NUM, HIGH);
-  delay(10);
+  vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 void setCameraStreamConfig(framesize_t frameSize) {
