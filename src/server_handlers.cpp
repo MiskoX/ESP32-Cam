@@ -7,6 +7,8 @@
 #include "server_utils.h"
 #include "web/app_js.h"
 #include "web/index_html.h"
+#include "web/strings_en_json.h"
+#include "web/strings_pl_json.h"
 #include "web/style_css.h"
 
 void serverHandleRoot() {
@@ -244,6 +246,30 @@ void serverHandleRoot() {
     server.sendHeader("Pragma", "no-cache");
     server.sendHeader("Expires", "0");
     server.send(200, "application/javascript", kAppJs);
+    return;
+  }
+
+  if (server.uri() == "/assets/strings.json") {
+    server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "0");
+    server.send(200, "application/json", kStringsPlJson);
+    return;
+  }
+
+  if (server.uri() == "/assets/strings.pl.json") {
+    server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "0");
+    server.send(200, "application/json", kStringsPlJson);
+    return;
+  }
+
+  if (server.uri() == "/assets/strings.en.json") {
+    server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "0");
+    server.send(200, "application/json", kStringsEnJson);
     return;
   }
 
@@ -665,6 +691,9 @@ void serverStartWeb() {
   server.on("/", HTTP_GET, serverHandleRoot);
   server.on("/assets/style.css", HTTP_GET, serverHandleRoot);
   server.on("/assets/app.js", HTTP_GET, serverHandleRoot);
+  server.on("/assets/strings.json", HTTP_GET, serverHandleRoot);
+  server.on("/assets/strings.pl.json", HTTP_GET, serverHandleRoot);
+  server.on("/assets/strings.en.json", HTTP_GET, serverHandleRoot);
   server.begin();
 
   ledServer.on("/", HTTP_GET, ledHandleRoot);
