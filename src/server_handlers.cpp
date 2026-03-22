@@ -54,7 +54,6 @@ void serverHandleRoot() {
       activeViewerLastSeenMs = nowMs;
       sessionReserveViewerForStartLocked(viewerToken);
       sessionCancelNoViewerPowerDownLocked();
-      serverSetPerformanceModeLocked(true);
       if (ownerChanged) {
         lastOwnerSwitchMs = nowMs;
         lastOwnerSwitchCooldownMs = sessionNextOwnerSwitchCooldownMs();
@@ -98,7 +97,6 @@ void serverHandleRoot() {
     activeViewerLastSeenMs = nowMs;
     sessionReserveViewerForStartLocked(viewerToken);
     sessionCancelNoViewerPowerDownLocked();
-    serverSetPerformanceModeLocked(true);
     lastOwnerSwitchMs = nowMs;
     lastOwnerSwitchCooldownMs = sessionNextOwnerSwitchCooldownMs();
     streamOwnerEpoch.fetch_add(1, std::memory_order_relaxed);
@@ -396,7 +394,6 @@ void streamHandleRoot() {
   }
 
   sessionCancelNoViewerPowerDownLocked();
-  serverSetPerformanceModeLocked(true);
   activeViewerLastSeenMs = nowMs;
   sessionClearStreamReservationLocked();
   uint32_t myEpoch = streamOwnerEpoch.load(std::memory_order_relaxed);
@@ -574,7 +571,6 @@ void streamHandleRoot() {
       activeViewerToken = "";
       sessionClearStreamReservationLocked();
       sessionScheduleNoViewerPowerDownLocked();
-      serverSetPerformanceModeLocked(false);
     }
     sessionUnlockState();
   }

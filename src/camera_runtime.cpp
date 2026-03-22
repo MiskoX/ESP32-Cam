@@ -1,5 +1,7 @@
 #include "camera_runtime.h"
 
+#include "server_utils.h"
+
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM 0
@@ -127,6 +129,7 @@ bool initCamera() {
   }
 
   cameraActive.store(true, std::memory_order_relaxed);
+  serverSetPerformanceModeLocked(true);
 
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
@@ -149,6 +152,7 @@ void shutdownCamera() {
 
   esp_camera_deinit();
   cameraActive.store(false, std::memory_order_relaxed);
+  serverSetPerformanceModeLocked(false);
   delay(10);
 
   pinMode(PWDN_GPIO_NUM, OUTPUT);
