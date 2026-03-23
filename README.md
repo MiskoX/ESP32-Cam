@@ -62,7 +62,7 @@ This keeps the web interface responsive while the video stream stays independent
 ### 2. Clone and build
 
 ```bash
-git clone https://github.com/<your-user>/ESP32-Cam.git
+git clone https://github.com/MiskoX/ESP32-Cam.git
 cd ESP32-Cam
 pio run
 ```
